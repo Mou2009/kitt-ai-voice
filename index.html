@@ -1,0 +1,62 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#050505"><title>KITT · Voz en directo</title><style>*{box-sizing:border-box}body{margin:0;background:#050505;color:#f5f5f5;font:16px -apple-system,BlinkMacSystemFont,Arial,sans-serif;min-height:100dvh;display:flex;align-items:center;justify-content:center}main{width:min(100%,480px);padding:20px;text-align:center}h1{letter-spacing:.17em;font-size:19px}canvas{width:100%;aspect-ratio:1;display:block;background:#000;border-radius:50%;box-shadow:0 0 25px #3a0808}button{padding:15px 18px;margin:7px 3px;background:#9e171e;color:white;border:0;border-radius:11px;font-size:16px;font-weight:650}button.secondary{background:#292929}#status{min-height:55px;line-height:1.4;color:#ddd}#meter{font-variant-numeric:tabular-nums;color:#ff7777}small{color:#aaa;display:block;line-height:1.5}input{width:85%;accent-color:#e22}label{display:block;margin:14px}</style></head><body><main><h1>KITT · VOZ EN DIRECTO · V8</h1><canvas id="screen" width="480" height="480"></canvas><p id="meter">Nivel: -- dBFS</p><button id="start">Activar micrófono</button><button class="secondary" id="demo">Demostración</button><button class="secondary" id="stop">Detener</button><label>Respuesta de voz (ajuste fino) <input id="sensitivity" type="range" min="1" max="100" value="50"></label><p id="status">V8: calibración automática. Activa el micrófono, guarda silencio 2 segundos y habla normal.</p><small>La voz se procesa en este dispositivo. No se graba ni se transmite. Requiere HTTPS o localhost para usar el micrófono.</small></main><script>
+const canvas=document.querySelector('#screen'),ctx=canvas.getContext('2d'),status=document.querySelector('#status'),meter=document.querySelector('#meter');let stream,ac,analyser,data,mode='idle',target=0,level=0,last=performance.now(),demoStart=0,noiseDb=-70,voicePeak=-38,calibrateUntil=0,calSamples=[],calibrated=false,shownDb=-100;
+function setStatus(s){status.textContent=s}function cleanup(){if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}if(ac){ac.close();ac=null}analyser=null;mode='idle';target=0;calibrated=false;calSamples=[];meter.textContent='Nivel: -- dBFS'}
+document.querySelector('#start').onclick=async()=>{cleanup();if(!navigator.mediaDevices?.getUserMedia){setStatus('Safari no permite acceder al micrófono desde esta dirección. Abre la página publicada con HTTPS, no el archivo local.');return}try{stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false},video:false});ac=new (window.AudioContext||window.webkitAudioContext)();analyser=ac.createAnalyser();analyser.fftSize=2048;data=new Float32Array(analyser.fftSize);let source=ac.createMediaStreamSource(stream);source.connect(analyser);await ac.resume();mode='mic';calibrateUntil=performance.now()+2200;calSamples=[];calibrated=false;setStatus('Calibrando ruido ambiente: guarda silencio durante 2 segundos.');}catch(e){setStatus('No se ha podido activar el micrófono: '+e.name+'. Comprueba permisos de Safari y HTTPS.')}};
+document.querySelector('#demo').onclick=()=>{cleanup();mode='demo';demoStart=performance.now();setStatus('Demostración activa (sin micrófono).')};document.querySelector('#stop').onclick=()=>{cleanup();setStatus('Detenido.')};
+function draw(t){let dt=Math.min((t-last)/1000,.05);last=t;let db=-100;if(mode==='mic'&&analyser){analyser.getFloatTimeDomainData(data);let sum=0;for(let i=0;i<data.length;i++)sum+=data[i]*data[i];let rms=Math.sqrt(sum/data.length);db=20*Math.log10(Math.max(rms,1e-6));let sens=+document.querySelector('#sensitivity').value;
+if(!calibrated){
+  calSamples.push(db);
+  target=0;
+  if(t>=calibrateUntil){
+    const sorted=calSamples.filter(Number.isFinite).sort((a,b)=>a-b);
+    noiseDb=sorted.length?sorted[Math.floor(sorted.length*.6)]:-65;
+    voicePeak=noiseDb+19;
+    calibrated=true;
+    setStatus('Calibrado. Habla con tu voz normal; la apertura se adapta automáticamente.');
+  }
+}else{
+  // Umbral de silencio calibrado, con margen para no reaccionar al ruido ambiente.
+  const floor=noiseDb+Math.max(3,7-(sens-50)*.07);
+  // Solo aprender el máximo de voz cuando hay actividad real.
+  if(db>floor+3){
+    voicePeak=Math.max(db,voicePeak-(dt*.9));
+  }else{
+    voicePeak=Math.max(noiseDb+16,voicePeak-dt*.28);
+    // Adaptar lentamente el ruido de fondo solo cuando no se detecta voz.
+    noiseDb+=(db-noiseDb)*Math.min(1,dt*.08);
+  }
+  const range=Math.max(10,Math.min(26,voicePeak-floor));
+  const raw=Math.max(0,Math.min(1,(db-floor)/Math.max(7,range*.80)));
+  target=Math.pow(raw,.85);
+}
+meter.textContent='Nivel: '+db.toFixed(1)+' dBFS';}else if(mode==='demo'){let sec=(t-demoStart)/1000;target=Math.max(0,Math.min(1,.5+.32*Math.sin(sec*6.2)+.21*Math.sin(sec*11.7)+.14*Math.sin(sec*2.9)));meter.textContent='Simulación (sin sonido real)'}else target=0;
+let speed=target>level?11:5.8;
+level+=(target-level)*(1-Math.exp(-dt*speed));
+ctx.clearRect(0,0,480,480);
+ctx.fillStyle='#000';ctx.fillRect(0,0,480,480);
+// Barras finas, con degradado original: centro más luminoso, laterales atenuados.
+// La apertura depende del RMS de la voz. Cada barra se desvanece, sin saltos.
+const bars=12, cy=(bars-1)/2;
+for(let col=0;col<3;col++){
+  const x=70+col*120, w=74;
+  for(let i=0;i<bars;i++){
+    const d=Math.abs(i-cy)/cy;
+    const edge=level*1.18-d;
+    const visible=Math.max(0,Math.min(1,(edge+0.13)/0.26));
+    const spatial=Math.pow(Math.max(0,1-d),0.75);
+    const colStrength=col===1?1:(0.32+0.47*spatial);
+    const intensity=(0.025+0.975*visible)*colStrength;
+    const barHeight=27-7*d; // barras exteriores ligeramente más bajas
+    const y=46+i*33.5+(27-barHeight)/2;
+    const r=col===1?255:255;
+    const g=col===1?Math.round(28+68*spatial):Math.round(14+48*spatial);
+    const b=col===1?Math.round(19+57*spatial):Math.round(11+33*spatial);
+    ctx.shadowColor='rgba(255,25,20,.55)';
+    ctx.shadowBlur=visible*7*colStrength;
+    ctx.fillStyle=`rgba(${r},${g},${b},${Math.min(1,intensity)})`;
+    ctx.fillRect(x,y,w,barHeight);
+  }
+}
+ctx.shadowBlur=0;
+requestAnimationFrame(draw)}requestAnimationFrame(draw);
+</script></body></html>
